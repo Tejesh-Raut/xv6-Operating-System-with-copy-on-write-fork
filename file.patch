@@ -1,0 +1,412 @@
+Binary files xv6_original/bootblock and xv6/bootblock differ
+Binary files xv6_original/_cat and xv6/_cat differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/defs.h xv6/defs.h
+--- xv6_original/defs.h	2016-10-02 22:30:19.619401848 +0530
++++ xv6/defs.h	2016-10-02 19:18:08.410991197 +0530
+@@ -66,6 +66,7 @@
+ void            kfree(char*);
+ void            kinit1(void*, void*);
+ void            kinit2(void*, void*);
++int 			getNumFreePages(void);
+ 
+ // kbd.c
+ void            kbdintr(void);
+@@ -176,6 +177,7 @@
+ void            switchkvm(void);
+ int             copyout(pde_t*, uint, void*, uint);
+ void            clearpteu(pde_t *pgdir, char *uva);
++void			pagefault(uint err_code);
+ 
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+Binary files xv6_original/_echo and xv6/_echo differ
+Binary files xv6_original/entryother and xv6/entryother differ
+Binary files xv6_original/_forktest and xv6/_forktest differ
+Binary files xv6_original/fs.img and xv6/fs.img differ
+Binary files xv6_original/.git/index and xv6/.git/index differ
+Binary files xv6_original/_grep and xv6/_grep differ
+Binary files xv6_original/_init and xv6/_init differ
+Binary files xv6_original/initcode and xv6/initcode differ
+Binary files xv6_original/initcode.out and xv6/initcode.out differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/kalloc.c xv6/kalloc.c
+--- xv6_original/kalloc.c	2016-10-02 22:30:19.619401848 +0530
++++ xv6/kalloc.c	2016-10-01 20:00:58.675237426 +0530
+@@ -20,6 +20,7 @@
+   struct spinlock lock;
+   int use_lock;
+   struct run *freelist;
++  int numFreePages;
+ } kmem;
+ 
+ // Initialization happens in two phases.
+@@ -32,6 +33,7 @@
+ {
+   initlock(&kmem.lock, "kmem");
+   kmem.use_lock = 0;
++  kmem.numFreePages = 0;
+   freerange(vstart, vend);
+ }
+ 
+@@ -72,6 +74,7 @@
+   r = (struct run*)v;
+   r->next = kmem.freelist;
+   kmem.freelist = r;
++  kmem.numFreePages = kmem.numFreePages + 1; // A new node is added to freelist so increase the number of free pages
+   if(kmem.use_lock)
+     release(&kmem.lock);
+ }
+@@ -88,9 +91,24 @@
+     acquire(&kmem.lock);
+   r = kmem.freelist;
+   if(r)
++  {
+     kmem.freelist = r->next;
++    kmem.numFreePages = kmem.numFreePages - 1 ; // A node is popped out from the freelist so decrease the number of free pages.
++  }
+   if(kmem.use_lock)
+     release(&kmem.lock);
+   return (char*)r;
+ }
+ 
++
++// Returns the number of free pages.
++int
++getNumFreePages(void)
++{
++  if(kmem.use_lock)
++    acquire(&kmem.lock);
++  int r = kmem.numFreePages;
++  if(kmem.use_lock)
++    release(&kmem.lock);
++  return (r);
++}
+\ No newline at end of file
+Binary files xv6_original/kernel and xv6/kernel differ
+Binary files xv6_original/_kill and xv6/_kill differ
+Binary files xv6_original/_ln and xv6/_ln differ
+Binary files xv6_original/_ls and xv6/_ls differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/Makefile xv6/Makefile
+--- xv6_original/Makefile	2016-10-02 22:30:19.619401848 +0530
++++ xv6/Makefile	2016-10-02 22:27:09.423395075 +0530
+@@ -51,7 +51,7 @@
+ endif
+ 
+ # If the makefile can't find QEMU, specify its path here
+-#QEMU = 
++QEMU = qemu-system-x86_64
+ 
+ # Try to infer the correct QEMU
+ ifndef QEMU
+@@ -170,6 +170,7 @@
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_testcow\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -239,7 +240,7 @@
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c testcow.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+Binary files xv6_original/_mkdir and xv6/_mkdir differ
+Binary files xv6_original/mkfs and xv6/mkfs differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/mkfs.c xv6/mkfs.c
+--- xv6_original/mkfs.c	2016-10-02 22:30:19.619401848 +0530
++++ xv6/mkfs.c	2016-10-01 20:02:30.055236093 +0530
+@@ -11,7 +11,7 @@
+ #include "stat.h"
+ #include "param.h"
+ 
+-#define static_assert(a, b) do { switch (0) case 0: case (a): ; } while (0)
++//#define static_assert(a, b) do { switch (0) case 0: case (a): ; } while (0)
+ 
+ int nblocks = 985;
+ int nlog = LOGSIZE;
+Binary files xv6_original/_mytest and xv6/_mytest differ
+Binary files xv6_original/_rm and xv6/_rm differ
+Binary files xv6_original/_sh and xv6/_sh differ
+Binary files xv6_original/_stressfs and xv6/_stressfs differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/syscall.c xv6/syscall.c
+--- xv6_original/syscall.c	2016-10-02 22:30:19.623401849 +0530
++++ xv6/syscall.c	2016-10-01 19:19:30.691273719 +0530
+@@ -98,6 +98,7 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_getNumFreePages(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -121,6 +122,7 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_getNumFreePages] sys_getNumFreePages,
+ };
+ 
+ void
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/syscall.h xv6/syscall.h
+--- xv6_original/syscall.h	2016-10-02 22:30:19.623401849 +0530
++++ xv6/syscall.h	2016-10-01 19:20:50.123272561 +0530
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_getNumFreePages	22
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/sysproc.c xv6/sysproc.c
+--- xv6_original/sysproc.c	2016-10-02 22:30:19.623401849 +0530
++++ xv6/sysproc.c	2016-10-01 20:01:49.071236690 +0530
+@@ -88,3 +88,9 @@
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_getNumFreePages(void)
++{
++  return getNumFreePages();
++}
+Binary files xv6_original/_testcow and xv6/_testcow differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/testcow.c xv6/testcow.c
+--- xv6_original/testcow.c	1970-01-01 05:30:00.000000000 +0530
++++ xv6/testcow.c	2016-10-02 22:26:22.247393395 +0530
+@@ -0,0 +1,33 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++
++int i = 3;
++int main(void)
++{
++	int pid;
++	pid = fork();
++	if(pid == 0)
++	{
++		printf(1,"Number of free pages in child 1 before changing variable are: %d\n", getNumFreePages());
++		i = 4;
++		printf(1,"Number of free pages in child 1 after changing variable due to copy are: %d\n", getNumFreePages());
++	}
++	else
++	{
++		wait();
++		pid = fork();
++		if(pid == 0)
++		{
++			printf(1,"Number of free pages in child 2 before changing variable are: %d\n", getNumFreePages());
++			i = 4;
++			printf(1,"Number of free pages in child 2 after changing variable due to copy are: %d\n", getNumFreePages());
++		}
++		else
++		{
++			printf(1,"Number of free pages in parent are: %d\n", getNumFreePages());
++			wait();
++		}
++	}	
++ 	exit();
++}
+\ No newline at end of file
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/trap.c xv6/trap.c
+--- xv6_original/trap.c	2016-10-02 22:30:19.623401849 +0530
++++ xv6/trap.c	2016-10-02 19:25:10.663006234 +0530
+@@ -47,6 +47,9 @@
+   }
+ 
+   switch(tf->trapno){
++  case T_PGFLT:
++      pagefault(tf->err);
++      break;
+   case T_IRQ0 + IRQ_TIMER:
+     if(cpu->id == 0){
+       acquire(&tickslock);
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/user.h xv6/user.h
+--- xv6_original/user.h	2016-10-02 22:30:19.623401849 +0530
++++ xv6/user.h	2016-10-01 19:14:30.751278095 +0530
+@@ -22,6 +22,7 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int getNumFreePages(void); // <added by me>
+ 
+ // ulib.c
+ int stat(char*, struct stat*);
+Binary files xv6_original/_usertests and xv6/_usertests differ
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/usys.S xv6/usys.S
+--- xv6_original/usys.S	2016-10-02 22:30:19.623401849 +0530
++++ xv6/usys.S	2016-10-01 20:11:21.187228345 +0530
+@@ -29,3 +29,4 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(getNumFreePages)
+diff -ENwbur -x '*.d' -x '*.o' -x '*.asm' -x '*.sym' -x '*HEAD' -x '*master' -x '*vectors.S' xv6_original/vm.c xv6/vm.c
+--- xv6_original/vm.c	2016-10-02 22:30:19.623401849 +0530
++++ xv6/vm.c	2016-10-02 20:41:11.443168654 +0530
+@@ -6,9 +6,12 @@
+ #include "mmu.h"
+ #include "proc.h"
+ #include "elf.h"
++#include "spinlock.h"
+ 
+ extern char data[];  // defined by kernel.ld
+ pde_t *kpgdir;  // for use in scheduler()
++struct spinlock lock;
++char pg_refcount[PHYSTOP >> PGSHIFT]; // array to store refcount
+ struct segdesc gdt[NSEGS];
+ 
+ // Set up CPU's kernel segment descriptors.
+@@ -188,6 +191,9 @@
+   mem = kalloc();
+   memset(mem, 0, PGSIZE);
+   mappages(pgdir, 0, PGSIZE, v2p(mem), PTE_W|PTE_U);
++  acquire(&lock);
++  pg_refcount[v2p(mem) >> PGSHIFT] = pg_refcount[v2p(mem) >> PGSHIFT] + 1 ;
++  release(&lock);
+   memmove(mem, init, sz);
+ }
+ 
+@@ -238,6 +244,9 @@
+     }
+     memset(mem, 0, PGSIZE);
+     mappages(pgdir, (char*)a, PGSIZE, v2p(mem), PTE_W|PTE_U);
++    acquire(&lock);
++    pg_refcount[v2p(mem) >> PGSHIFT] = pg_refcount[v2p(mem) >> PGSHIFT] + 1 ;
++    release(&lock);
+   }
+   return newsz;
+ }
+@@ -264,8 +273,13 @@
+       pa = PTE_ADDR(*pte);
+       if(pa == 0)
+         panic("kfree");
++      acquire(&lock);
++      if(--pg_refcount[pa >> PGSHIFT] == 0)// if no other page table is pointing to this page remove it
++      {
+       char *v = p2v(pa);
+       kfree(v);
++      }
++      release(&lock);
+       *pte = 0;
+     }
+   }
+@@ -312,7 +326,7 @@
+   pde_t *d;
+   pte_t *pte;
+   uint pa, i, flags;
+-  char *mem;
++  //char *mem; //No need to allocate new memory
+ 
+   if((d = setupkvm()) == 0)
+     return 0;
+@@ -321,18 +335,28 @@
+       panic("copyuvm: pte should exist");
+     if(!(*pte & PTE_P))
+       panic("copyuvm: page not present");
++    *pte &= ~PTE_W; // make this page table unwritable
+     pa = PTE_ADDR(*pte);
+     flags = PTE_FLAGS(*pte);
++    /*
+     if((mem = kalloc()) == 0)
+       goto bad;
+     memmove(mem, (char*)p2v(pa), PGSIZE);
+     if(mappages(d, (void*)i, PGSIZE, v2p(mem), flags) < 0)
++    */
++    // No need of page allocation
++    if(mappages(d, (void*)i, PGSIZE, pa, flags) < 0) // map the child's page table to same permanent addresses
+       goto bad;
++    acquire(&lock);
++    pg_refcount[pa >> PGSHIFT] = pg_refcount[pa >> PGSHIFT] + 1; // increase reference count of that permanent page.
++    release(&lock);
+   }
++  lcr3(v2p(pgdir)); // reinstall the page table
+   return d;
+ 
+ bad:
+   freevm(d);
++  lcr3(v2p(pgdir)); // reinstall the page table
+   return 0;
+ }
+ 
+@@ -376,3 +400,74 @@
+   }
+   return 0;
+ }
++
++void pagefault(uint err_code)
++{
++  uint va = rcr2();
++  uint pa;
++  pte_t *pte;
++  char *mem;
++  if(va >= KERNBASE)
++  {
++    cprintf("pid %d %s: Illegal memory access on CPU %d due to virtual address 0x%x is mapped to kernel code. So killing the process\n", proc->pid, proc->name, cpu->id, va);
++    proc->killed = 1;
++    return;
++  }
++  if((pte = walkpgdir(proc->pgdir, (void*)va, 0))==0)
++  {
++    cprintf("pid %d %s: Illegal memory access on CPU %d due to virtual address 0x%x is mapped to NULL pte. So killing the process\n", proc->pid, proc->name, cpu->id, va);
++    proc->killed = 1;
++    return;
++  }
++  if(!(*pte & PTE_P))
++  {
++    cprintf("pid %d %s: Illegal memory access on CPU %d due to virtual address 0x%x is mapped to pte which is not present. So killing the process\n", proc->pid, proc->name, cpu->id, va);
++    proc->killed = 1;
++    return;
++  }
++  if(!(*pte & PTE_U))
++  {
++    cprintf("pid %d %s: Illegal memory access on CPU %d due to virtual address 0x%x is mapped to pte which is not accessible to user. So killing the process\n", proc->pid, proc->name, cpu->id, va);
++    proc->killed = 1;
++    return;
++  }
++  if(*pte & PTE_W)
++  {
++    panic("Unknown page fault due to a writable pte");
++  }
++  else
++  {
++    pa = PTE_ADDR(*pte);
++    acquire(&lock);
++    if(pg_refcount[pa >> PGSHIFT] == 1)
++    {
++      release(&lock);
++      *pte |= PTE_W;
++    }
++    else
++    {
++      if(pg_refcount[pa >> PGSHIFT] > 1)
++      {
++        release(&lock);
++        if((mem = kalloc()) == 0)
++        {
++          cprintf("pid %d %s: Pagefault due to out of memory", proc->pid, proc->name);
++          proc->killed = 1;
++          return;
++        }
++        memmove(mem, (char*)p2v(pa), PGSIZE);
++        acquire(&lock);
++        pg_refcount[pa >> PGSHIFT] = pg_refcount[pa >> PGSHIFT] - 1;
++        pg_refcount[v2p(mem) >> PGSHIFT] = pg_refcount[v2p(mem) >> PGSHIFT] + 1;
++        release(&lock);
++        *pte = v2p(mem) | PTE_P | PTE_W | PTE_U;
++      }
++      else
++      {
++        release(&lock);
++        panic("Pagefault due to wrong ref count");
++      }
++    }
++    lcr3(v2p(proc->pgdir));
++  }
++}
+Binary files xv6_original/_wc and xv6/_wc differ
+Binary files xv6_original/xv6.img and xv6/xv6.img differ
+Binary files xv6_original/_zombie and xv6/_zombie differ
